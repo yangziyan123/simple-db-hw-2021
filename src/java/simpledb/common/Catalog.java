@@ -174,6 +174,7 @@ public class Catalog {
     public void clear() {
         // some code goes here
         tableIdMap.clear();
+//        tableNameMap.clear();
     }
     
     /**
