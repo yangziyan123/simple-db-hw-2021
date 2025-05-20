@@ -1,6 +1,7 @@
+//参考：https://blog.csdn.net/weixin_45938441/article/details/127949453
 package simpledb.common;
 
-import simpledb.common.Type;
+//import simpledb.common.Type;
 import simpledb.storage.DbFile;
 import simpledb.storage.HeapFile;
 import simpledb.storage.TupleDesc;
@@ -23,12 +24,59 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class Catalog {
 
+    public class Table {
+        /**
+         * the contents of the table to add;  file.getId() is the identfier of
+         * this file/tupledesc param for the calls getTupleDesc and getFile
+         */
+        private DbFile file;
+
+        /**
+         * the name of the table -- may be an empty string.  May not be null.  If a name
+         * conflict exists, use the last table to be added as the table for a given name.
+         */
+        private String name;
+
+        /**
+         * the name of the primary key field
+         */
+        private String pkeyField;
+
+        public Table(DbFile file,String name,String pkeyField){
+            this.file = file;
+            this.name = name;
+            this.pkeyField = pkeyField;
+        }
+
+        public Table(DbFile file,String name){
+            new Table(file,name,"");
+        }
+
+        public DbFile getFile() {
+            return file;
+        }
+
+        public String getPkeyField() {
+            return pkeyField;
+        }
+
+        public String getName() {
+            return name;
+        }
+    }
+
+    ConcurrentHashMap<Integer,Table> tableIdMap;
+
+    ConcurrentHashMap<String,Integer> tableNameMap;
+
     /**
      * Constructor.
      * Creates a new, empty catalog.
      */
     public Catalog() {
         // some code goes here
+        tableIdMap = new ConcurrentHashMap<>();
+        tableNameMap = new ConcurrentHashMap<>();
     }
 
     /**
@@ -42,6 +90,8 @@ public class Catalog {
      */
     public void addTable(DbFile file, String name, String pkeyField) {
         // some code goes here
+        tableIdMap.put(file.getId(),new Table(file,name,pkeyField));
+        tableNameMap.put(name,file.getId());
     }
 
     public void addTable(DbFile file, String name) {
@@ -65,7 +115,10 @@ public class Catalog {
      */
     public int getTableId(String name) throws NoSuchElementException {
         // some code goes here
-        return 0;
+        if(name != null && tableNameMap.containsKey(name)){
+            return tableNameMap.get(name);
+        }
+        throw new NoSuchElementException("table doesn't exist!");
     }
 
     /**
@@ -76,7 +129,10 @@ public class Catalog {
      */
     public TupleDesc getTupleDesc(int tableid) throws NoSuchElementException {
         // some code goes here
-        return null;
+        if(tableIdMap.containsKey(tableid)){
+            return tableIdMap.get(tableid).getFile().getTupleDesc();
+        }
+        throw new NoSuchElementException("table doesn't exist!");
     }
 
     /**
@@ -87,27 +143,37 @@ public class Catalog {
      */
     public DbFile getDatabaseFile(int tableid) throws NoSuchElementException {
         // some code goes here
-        return null;
+        if(tableIdMap.containsKey(tableid)){
+            return tableIdMap.get(tableid).getFile();
+        }
+        throw new NoSuchElementException("table doesn't exist!");
     }
 
     public String getPrimaryKey(int tableid) {
         // some code goes here
-        return null;
+        if(tableIdMap.containsKey(tableid)){
+            return tableIdMap.get(tableid).getPkeyField();
+        }
+        throw new NoSuchElementException("table doesn't exist!");
     }
 
     public Iterator<Integer> tableIdIterator() {
         // some code goes here
-        return null;
+        return tableIdMap.keySet().iterator();
     }
 
     public String getTableName(int id) {
         // some code goes here
-        return null;
+        if(tableIdMap.containsKey(id)){
+            return tableIdMap.get(id).getName();
+        }
+        throw new NoSuchElementException("table doesn't exist!");
     }
     
     /** Delete all tables from the catalog */
     public void clear() {
         // some code goes here
+        tableIdMap.clear();
     }
     
     /**

@@ -277,3 +277,12 @@ public class TupleDesc implements Serializable {
         return stringBuilder.toString();
     }
 }
+/*
+    public int getSizeInBytes() {
+        int totalSize = 0;
+        for (Type type : typeAr) {
+            totalSize += type.getSizeInBytes();
+        }
+        return totalSize;
+    }
+ */
