@@ -1,14 +1,13 @@
+// 参考：https://blog.csdn.net/DespairC/article/details/124253674
 package simpledb.execution;
 
-import simpledb.common.DbException;
 import simpledb.common.Type;
 import simpledb.storage.*;
-import simpledb.transaction.TransactionAbortedException;
 
-import java.util.Iterator;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.NoSuchElementException;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Knows how to compute some aggregate over a set of StringFields.
@@ -16,30 +15,13 @@ import java.util.concurrent.ConcurrentHashMap;
 public class StringAggregator implements Aggregator {
 
     private static final long serialVersionUID = 1L;
-    private static final Field NO_GROUP_FIELD = new StringField("NO_GROUP_FIELD",20);
-    /**
-     * 需要分组的字段的索引（从0开始
-     */
-    private int groupByIndex;
 
-    /**
-     * 需要分组的字段类型
-     */
-    private Type groupByType;
+    private final int gbfield;
+    private final Type gbfieldtype;
+    private final int afield;
+    private final Op what;
+    Map<Field, Integer> aggResult;
 
-    /**
-     * 需要聚合的字段的索引（从0开始
-     */
-    private int aggregateIndex;
-
-    private TupleDesc aggDesc;
-
-    /**
-     * 分组计算Map只需要计算count
-     */
-    private Map<Field, Integer> groupCalMap;
-
-    private Map<Field,Tuple> resultMap;
     /**
      * Aggregate constructor
      * @param gbfield the 0-based index of the group-by field in the tuple, or NO_GROUPING if there is no grouping
@@ -51,24 +33,14 @@ public class StringAggregator implements Aggregator {
 
     public StringAggregator(int gbfield, Type gbfieldtype, int afield, Op what) {
         // some code goes here
-        if(what != Op.COUNT){
-            throw new IllegalArgumentException("The Op Type != COUNT");
+        if(!what.equals(Op.COUNT)){
+            throw new IllegalArgumentException("String类型只支持计数");
         }
-
-        this.groupByIndex = gbfield;
-        this.groupByType = gbfieldtype;
-        this.aggregateIndex = afield;
-
-        this.groupCalMap = new ConcurrentHashMap<>();
-        this.resultMap = new ConcurrentHashMap<>();
-
-        if (this.groupByIndex >= 0) {
-            // 有groupBy
-            this.aggDesc = new TupleDesc(new Type[]{this.groupByType,Type.INT_TYPE}, new String[]{"groupVal","aggregateVal"});
-        } else {
-            // 无groupBy
-            this.aggDesc = new TupleDesc(new Type[]{Type.INT_TYPE}, new String[]{"aggregateVal"});
-        }
+        this.gbfield = gbfield;
+        this.gbfieldtype = gbfieldtype;
+        this.afield = afield;
+        this.what = what;
+        aggResult = new HashMap<>();
     }
 
     /**
@@ -77,25 +49,17 @@ public class StringAggregator implements Aggregator {
      */
     public void mergeTupleIntoGroup(Tuple tup) {
         // some code goes here
-        Field groupByField = this.groupByIndex == NO_GROUPING ? NO_GROUP_FIELD : tup.getField(this.groupByIndex);
-        if(!NO_GROUP_FIELD.equals(groupByField) && groupByField.getType() != groupByType){
-            throw new IllegalArgumentException("Except groupType is: "+ this.groupByType + ",But given "+ groupByField.getType());
+        // 分组
+        Field gbFiled = gbfield == NO_GROUPING ? null : tup.getField(gbfield);
+        // 聚合值 由于是字符串，这里是计数，没有任何使用
+        //StringField aField = (StringField) tup.getField(afield);
+        //String newValue = aField.getValue();
+        if(aggResult.containsKey(gbFiled)){
+            aggResult.put(gbFiled, aggResult.get(gbFiled) + 1);
         }
-        if(!(tup.getField(this.aggregateIndex) instanceof StringField)){
-            throw new IllegalArgumentException("Except aggType is: 「 StringField 」" + ",But given "+ tup.getField(this.aggregateIndex).getType());
+        else{
+            aggResult.put(gbFiled, 1);
         }
-
-        this.groupCalMap.put(groupByField,this.groupCalMap.getOrDefault(groupByField,0)+1);
-        Tuple curCalTuple = new Tuple(aggDesc);
-        if (this.groupByIndex >= 0) {
-            // 有groupBy
-            curCalTuple.setField(0,groupByField);
-            curCalTuple.setField(1,new IntField(this.groupCalMap.get(groupByField)));
-        } else {
-            // 无groupBy
-            curCalTuple.setField(0,new IntField(this.groupCalMap.get(groupByField)));
-        }
-        resultMap.put(groupByField,curCalTuple);
     }
 
     /**
@@ -108,47 +72,41 @@ public class StringAggregator implements Aggregator {
      */
     public OpIterator iterator() {
         // some code goes here
-//        throw new UnsupportedOperationException("please implement me for lab2");
-        return new StringAggTupIterator();
-    }
-    private class StringAggTupIterator implements OpIterator {
-        private boolean open = false;
-        private Iterator<Map.Entry<Field, Tuple>> iter;
+        // 构建 tuple 需要
+        Type[] types;
+        String[] names;
+        TupleDesc tupleDesc;
+        // 储存结果
+        List<Tuple> tuples = new ArrayList<>();
+        if(gbfield == NO_GROUPING){
+            types = new Type[]{Type.INT_TYPE};
+            names = new String[]{"aggregateVal"};
+            tupleDesc = new TupleDesc(types, names);
+            Tuple tuple = new Tuple(tupleDesc);
+            tuple.setField(0, new IntField(aggResult.get(null)));
+            tuples.add(tuple);
+        }else{
+            types = new Type[]{gbfieldtype, Type.INT_TYPE};
+            names = new String[]{"groupVal", "aggregateVal"};
+            tupleDesc = new TupleDesc(types, names);
+            for(Field field: aggResult.keySet()){
+                Tuple tuple = new Tuple(tupleDesc);
 
-        @Override
-        public void open() throws DbException, TransactionAbortedException {
-            iter = resultMap.entrySet().iterator();
-            open = true;
-        }
+                if(gbfieldtype == Type.INT_TYPE){
+                    IntField intField = (IntField) field;
+                    tuple.setField(0, intField);
+                }
+                else{
+                    StringField stringField = (StringField) field;
+                    tuple.setField(0, stringField);
+                }
 
-        @Override
-        public void close() {
-            open = false;
-        }
-
-        @Override
-        public boolean hasNext() throws DbException, TransactionAbortedException {
-            if (open && iter.hasNext()) {
-                return true;
-            } else {
-                return false;
+                IntField resultField = new IntField(aggResult.get(field));
+                tuple.setField(1, resultField);
+                tuples.add(tuple);
             }
         }
-
-        @Override
-        public Tuple next() throws DbException, TransactionAbortedException, NoSuchElementException {
-            return iter.next().getValue();
-        }
-
-        @Override
-        public void rewind() throws DbException, TransactionAbortedException {
-            this.close();
-            this.open();
-        }
-
-        @Override
-        public TupleDesc getTupleDesc() {
-            return aggDesc;
-        }
+        return new TupleIterator(tupleDesc, tuples);
     }
+
 }

@@ -1,14 +1,13 @@
+// 参考：https://blog.csdn.net/DespairC/article/details/124253674
 package simpledb.execution;
 
-import simpledb.common.DbException;
 import simpledb.common.Type;
 import simpledb.storage.*;
-import simpledb.transaction.TransactionAbortedException;
 
-import java.util.Iterator;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.NoSuchElementException;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Knows how to compute some aggregate over a set of IntFields.
@@ -17,72 +16,104 @@ public class IntegerAggregator implements Aggregator {
 
     private static final long serialVersionUID = 1L;
 
-    private static final Field NO_GROUP_FIELD = new StringField("NO_GROUP_FIELD",20);
+    // 分组字段的序号（是一个字段，用于辨别是否是该类型）举例：group by 字段
+    private final int gbfield;
+    private final Type gbfieldtype;
+    // 聚合字段的序号（是用于取新插入的值） 举例： sum(字段),min(字段)
+    private int afield;
+    // 操作符
+    private Op what;
 
-    /**
-     * 需要分组的字段的索引（从0开始
-     */
-    private int groupByIndex;
+    private AggHandler aggHandler;
 
-    /**
-     * 需要分组的字段类型
-     */
-    private Type groupByType;
+    private abstract class AggHandler{
+        // 存储字段对应的聚合结果
+        Map<Field, Integer> aggResult;
+        // gbField 用于分组的字段， aggField 现阶段聚合结果
+        abstract void handle(Field gbField, IntField aggField);
 
-    /**
-     * 需要聚合的字段的索引（从0开始
-     */
-    private int aggregateIndex;
+        public AggHandler(){
+            aggResult = new HashMap<>();
+        }
 
-    /**
-     * 需要聚合的操作
-     */
-    private Op aggOp;
+        public Map<Field, Integer> getAggResult() {
+            return aggResult;
+        }
+    }
 
-    /**
-     * 分组计算Map: MAX,MIN,COUNT,SUM,理论上都只需要这一个calMap计算出来，如果是计算平均值，值则需要计算每个数出现的次数
-     */
-    private Map<Field, GroupCalResult> groupCalMap;
+    private class CountHandler extends AggHandler{
+        @Override
+        void handle(Field gbField, IntField aggField) {
+            if(aggResult.containsKey(gbField)){
+                aggResult.put(gbField, aggResult.get(gbField) + 1);
+            }
+            else{
+                aggResult.put(gbField, 1);
+            }
+        }
+    }
 
-    private Map<Field,Tuple> resultMap;
+    private class SumHandler extends AggHandler{
+        @Override
+        void handle(Field gbField, IntField aggField) {
+            int value = aggField.getValue();
+            if(aggResult.containsKey(gbField)){
+                aggResult.put(gbField, aggResult.get(gbField) + value);
+            }
+            else{
+                aggResult.put(gbField, value);
+            }
+        }
+    }
 
+    private class MaxHandler extends AggHandler{
+        @Override
+        void handle(Field gbField, IntField aggField) {
+            int value = aggField.getValue();
+            if(aggResult.containsKey(gbField)){
+                aggResult.put(gbField,Math.max(aggResult.get(gbField), value));
+            }
+            else{
+                aggResult.put(gbField, value);
+            }
+        }
+    }
 
+    private class MinHandler extends AggHandler{
+        @Override
+        void handle(Field gbField, IntField aggField) {
+            int value = aggField.getValue();
+            if(aggResult.containsKey(gbField)){
+                aggResult.put(gbField,Math.min(aggResult.get(gbField), value));
+            }
+            else{
+                aggResult.put(gbField, value);
+            }
+        }
+    }
 
-    /**
-     * for groupCalMap
-     */
-    private static class GroupCalResult {
-
-        public static final Integer DEFAULT_COUNT = 0;
-        public static final Integer Deactivate_COUNT = -1;
-        public static final Integer DEFAULT_RES = 0;
-        public static final Integer Deactivate_RES = -1;
-        /**
-         * 当前分组计算的结果：SUM、AVG、MIN、MAX、SUM
-         */
-        private Integer result;
-
-        /**
-         * 当前Field出现的频度
-         */
-        private Integer count;
-
-        public GroupCalResult(int result,int count){
-            this.result = result;
-            this.count = count;
+    private class AvgHandler extends AggHandler{
+        Map<Field, Integer> sum = new HashMap<>();
+        Map<Field, Integer> count = new HashMap<>();
+        @Override
+        void handle(Field gbField, IntField aggField) {
+            int value = aggField.getValue();
+            // 求和 + 计数
+            if(sum.containsKey(gbField) && count.containsKey(gbField)){
+                sum.put(gbField, sum.get(gbField) + value);
+                count.put(gbField, count.get(gbField) + 1);
+            }
+            else{
+                sum.put(gbField, value);
+                count.put(gbField, 1);
+            }
+            aggResult.put(gbField, sum.get(gbField) / count.get(gbField));
         }
     }
 
     /**
-     *  聚合后Tuple的desc
-     *  Each tuple in the result is a pair of the form (groupValue, aggregateValue), unless the value of the group by
-     *  field was Aggregator.NO_GROUPING, in which case the result is a single tuple of the form (aggregateValue).
-     */
-    private TupleDesc aggDesc;
-
-    /**
      * Aggregate constructor
-     * 
+     *
      * @param gbfield
      *            the 0-based index of the group-by field in the tuple, or
      *            NO_GROUPING if there is no grouping
@@ -97,102 +128,51 @@ public class IntegerAggregator implements Aggregator {
 
     public IntegerAggregator(int gbfield, Type gbfieldtype, int afield, Op what) {
         // some code goes here
-        this.groupByIndex = gbfield;
-        this.groupByType = gbfieldtype;
-        this.aggregateIndex = afield;
-        this.aggOp = what;
-
-        this.groupCalMap = new ConcurrentHashMap<>();
-        this.resultMap = new ConcurrentHashMap<>();
-
-        if (this.groupByIndex >= 0) {
-            // 有groupBy
-            this.aggDesc = new TupleDesc(new Type[]{this.groupByType,Type.INT_TYPE}, new String[]{"groupVal","aggregateVal"});
-        } else {
-            // 无groupBy
-            this.aggDesc = new TupleDesc(new Type[]{Type.INT_TYPE}, new String[]{"aggregateVal"});
+        this.gbfield = gbfield;
+        this.gbfieldtype = gbfieldtype;
+        this.afield = afield;
+        this.what = what;
+        // 判读运算符号
+        switch (what){
+            case MIN:
+                aggHandler = new MinHandler();
+                break;
+            case MAX:
+                aggHandler = new MaxHandler();
+                break;
+            case AVG:
+                aggHandler = new AvgHandler();
+                break;
+            case SUM:
+                aggHandler = new SumHandler();
+                break;
+            case COUNT:
+                aggHandler = new CountHandler();
+                break;
+            default:
+                throw new IllegalArgumentException("聚合器不支持当前运算符");
         }
     }
 
     /**
-     * Merge a new tuple into the aggregate, grouping as indicated in the
+     * Merge a new tuple into the aggregate, grouping as indicated(指示) in the
      * constructor
-     * 
+     *
      * @param tup
      *            the Tuple containing an aggregate field and a group-by field
      */
     public void mergeTupleIntoGroup(Tuple tup) {
         // some code goes here
-        Field groupByField = this.groupByIndex == NO_GROUPING ? NO_GROUP_FIELD : tup.getField(this.groupByIndex);
-        if(!NO_GROUP_FIELD.equals(groupByField) && groupByField.getType() != groupByType){
-            throw new IllegalArgumentException("Except groupType is: 「"+ this.groupByType + " 」,But given "+ groupByField.getType());
-        }
-        if(!(tup.getField(this.aggregateIndex) instanceof IntField)){
-            throw new IllegalArgumentException("Except aggType is: 「 IntField 」" + ",But given "+ tup.getField(this.aggregateIndex).getType());
-        }
-
-        IntField aggField = (IntField) tup.getField(this.aggregateIndex);
-        int curVal = aggField.getValue();
-
-        // 如果没有分组，则groupByIndex = -1 ,如果没有分组的情况直接为null的话那么concurrentHashMap就不适合 , 则需要赋默认值
-        // 不考虑并发的话，则直接用HashMap不需要默认值
-        // 1、store
-        switch (this.aggOp){
-            case MIN:
-                this.groupCalMap.put(groupByField,new GroupCalResult(Math.min(groupCalMap.getOrDefault(groupByField,
-                        new GroupCalResult(Integer.MAX_VALUE,GroupCalResult.Deactivate_COUNT)).result,curVal),GroupCalResult.Deactivate_COUNT));
-                break;
-            case MAX:
-                this.groupCalMap.put(groupByField,new GroupCalResult(Math.max(groupCalMap.getOrDefault(groupByField,
-                        new GroupCalResult(Integer.MIN_VALUE,GroupCalResult.Deactivate_COUNT)).result,curVal),GroupCalResult.Deactivate_COUNT));
-                break;
-            case SUM:
-                this.groupCalMap.put(groupByField,new GroupCalResult(groupCalMap.getOrDefault(groupByField,
-                        new GroupCalResult(GroupCalResult.DEFAULT_RES,GroupCalResult.Deactivate_COUNT)).result+curVal, GroupCalResult.Deactivate_COUNT));
-                break;
-            case COUNT:
-                this.groupCalMap.put(groupByField,new GroupCalResult(GroupCalResult.Deactivate_RES, groupCalMap.getOrDefault(groupByField,
-                        new GroupCalResult(GroupCalResult.Deactivate_RES,GroupCalResult.DEFAULT_COUNT)).count+1));
-                break;
-            case AVG:
-                GroupCalResult pre = this.groupCalMap.getOrDefault(groupByField, new GroupCalResult(GroupCalResult.DEFAULT_RES, GroupCalResult.DEFAULT_COUNT));
-                this.groupCalMap.put(groupByField,new GroupCalResult(pre.result+curVal,pre.count+1));
-                break;
-            // TODO:in lab7
-            case SC_AVG:
-                break;
-            // TODO:in lab7
-            case SUM_COUNT:
-
-        }
-
-        // 2、cal
-        Tuple curCalTuple = new Tuple(aggDesc);
-        int curCalRes = 0;
-        if(this.aggOp == Op.MIN || this.aggOp == Op.MAX || this.aggOp == Op.SUM){
-            curCalRes = this.groupCalMap.get(groupByField).result;
-        }else if(this.aggOp == Op.COUNT){
-            curCalRes = this.groupCalMap.get(groupByField).count;
-        }else if(this.aggOp == Op.AVG){
-            // 因为是IntField所以必然精度会有问题
-            curCalRes = this.groupCalMap.get(groupByField).result / this.groupCalMap.get(groupByField).count;
-        }
-        if (this.groupByIndex >= 0) {
-            // 有groupBy
-            curCalTuple.setField(0,groupByField);
-            curCalTuple.setField(1,new IntField(curCalRes));
-        } else {
-            // 无groupBy
-            curCalTuple.setField(0,new IntField(curCalRes));
-        }
-
-        // 3、update
-        resultMap.put(groupByField,curCalTuple);
+        // 获得要处理值的字段
+        IntField afield = (IntField) tup.getField(this.afield);
+        // 分组的字段
+        Field gbfield = this.gbfield == NO_GROUPING ? null : tup.getField(this.gbfield);
+        aggHandler.handle(gbfield, afield);
     }
 
     /**
      * Create a OpIterator over group aggregate results.
-     * 
+     *
      * @return a OpIterator whose tuples are the pair (groupVal, aggregateVal)
      *         if using group, or a single (aggregateVal) if no grouping. The
      *         aggregateVal is determined by the type of aggregate specified in
@@ -200,50 +180,47 @@ public class IntegerAggregator implements Aggregator {
      */
     public OpIterator iterator() {
         // some code goes here
-//        throw new
-//        UnsupportedOperationException("please implement me for lab2");
-        return new IntAggTupIterator();
-    }
-
-    private class IntAggTupIterator implements OpIterator {
-        private boolean open = false;
-        private Iterator<Map.Entry<Field, Tuple>> iter;
-
-        @Override
-        public void open() throws DbException, TransactionAbortedException {
-            iter = resultMap.entrySet().iterator();
-            open = true;
+        // 获取聚合集
+        Map<Field, Integer> aggResult = aggHandler.getAggResult();
+        // 构建 tuple 需要
+        Type[] types;
+        String[] names;
+        TupleDesc tupleDesc;
+        // 储存结果
+        List<Tuple> tuples = new ArrayList<>();
+        // 如果没有分组
+        if(gbfield == NO_GROUPING){
+            types = new Type[]{Type.INT_TYPE};
+            names = new String[]{"aggregateVal"};
+            tupleDesc = new TupleDesc(types, names);
+            // 获取结果字段
+            IntField resultField = new IntField(aggResult.get(null));
+            // 组合成行（临时行，不需要存储，只需要设置字段值）
+            Tuple tuple = new Tuple(tupleDesc);
+            tuple.setField(0, resultField);
+            tuples.add(tuple);
         }
+        else{
+            types = new Type[]{gbfieldtype, Type.INT_TYPE};
+            names = new String[]{"groupVal", "aggregateVal"};
+            tupleDesc = new TupleDesc(types, names);
+            for(Field field: aggResult.keySet()){
+                Tuple tuple = new Tuple(tupleDesc);
+                if(gbfieldtype == Type.INT_TYPE){
+                    IntField intField = (IntField) field;
+                    tuple.setField(0, intField);
+                }
+                else{
+                    StringField stringField = (StringField) field;
+                    tuple.setField(0, stringField);
+                }
 
-        @Override
-        public void close() {
-            open = false;
-        }
-
-        @Override
-        public boolean hasNext() throws DbException, TransactionAbortedException {
-            if (open && iter.hasNext()) {
-                return true;
-            } else {
-                return false;
+                IntField resultField = new IntField(aggResult.get(field));
+                tuple.setField(1, resultField);
+                tuples.add(tuple);
             }
         }
-
-        @Override
-        public Tuple next() throws DbException, TransactionAbortedException, NoSuchElementException {
-            return iter.next().getValue();
-        }
-
-        @Override
-        public void rewind() throws DbException, TransactionAbortedException {
-            this.close();
-            this.open();
-        }
-
-        @Override
-        public TupleDesc getTupleDesc() {
-            return aggDesc;
-        }
+        return new TupleIterator(tupleDesc ,tuples);
     }
 
 }
